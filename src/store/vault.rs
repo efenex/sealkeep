@@ -5,14 +5,15 @@
 //! The `custom_metadata` of each secret lists its keys with their descriptions, so
 //! `list` reads metadata only and no value.
 //!
-//! Auth: a token (`$VAULT_TOKEN` or the keyring entry `vault-token:<store>`), a
+//! `$VAULT_TOKEN`, when set, is used whatever the auth method. Otherwise:
+//! a token (the keyring entry `vault-token:<store>`), a
 //! Kubernetes ServiceAccount JWT from `jwt_command` that Vault exchanges for a token that
 //! lives for the TTL of its role, an AppRole whose role ID and secret ID are in files, or
 //! a token file that another program (a vault-agent sink) keeps fresh. The last two need
 //! no keyring, so a store of either kind works on a machine with no desktop session. `port_forward` reaches a Vault that has no address
 //! outside its cluster, through the Kubernetes API that the kubeconfig already reaches.
 
-use super::{SecretInfo, Store, keyring};
+use super::{SecretInfo, Store, Unreachable, keyring};
 use crate::config::{self, DEFAULT_KEYRING_SERVICE, StoreConfig, VaultAuth};
 use crate::names;
 use anyhow::{Context, Result, anyhow, bail};
@@ -22,6 +23,14 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use ureq::Agent;
+
+/// A transport failure (no connection, DNS, proxy, TLS) as an [`Unreachable`].
+fn unreachable(base: &str, e: ureq::Error) -> anyhow::Error {
+    anyhow::Error::new(Unreachable {
+        what: format!("Vault at {base}"),
+        source: Box::new(e),
+    })
+}
 
 /// The custom_metadata value of a key with no description.
 const NO_DESCRIPTION: &str = "-";
@@ -185,7 +194,7 @@ impl VaultStore {
             .agent
             .post(format!("{base}/v1/auth/{mount}/login"))
             .send_json(body)
-            .with_context(|| format!("reach Vault at {base}"))?;
+            .map_err(|e| unreachable(base, e))?;
         let status = resp.status().as_u16();
         let body = resp.body_mut().read_to_string().unwrap_or_default();
         if status != 200 {
@@ -199,21 +208,24 @@ impl VaultStore {
     }
 
     fn login(&self, base: &str) -> Result<String> {
+        // $VAULT_TOKEN wins over every auth method, as with the vault CLI: an operator
+        // with a personal token writes through a store whose own auth is read-only.
+        if let Ok(t) = std::env::var("VAULT_TOKEN")
+            && !t.is_empty()
+        {
+            return Ok(t);
+        }
         match self.auth {
-            VaultAuth::Token => {
-                if let Ok(t) = std::env::var("VAULT_TOKEN")
-                    && !t.is_empty()
-                {
-                    return Ok(t);
-                }
-                keyring::read(DEFAULT_KEYRING_SERVICE, &Self::token_user(&self.name))?
-                    .with_context(|| {
-                        format!(
-                            "store `{}` has no token: set $VAULT_TOKEN, or run `sealkeep store token {}`",
-                            self.name, self.name
-                        )
-                    })
-            }
+            VaultAuth::Token => keyring::read(
+                DEFAULT_KEYRING_SERVICE,
+                &Self::token_user(&self.name),
+            )?
+            .with_context(|| {
+                format!(
+                    "store `{}` has no token: set $VAULT_TOKEN, or run `sealkeep store token {}`",
+                    self.name, self.name
+                )
+            }),
             VaultAuth::Kubernetes => {
                 let out = Command::new(&self.jwt_command[0])
                     .args(&self.jwt_command[1..])
@@ -297,7 +309,7 @@ impl VaultStore {
                 .send_empty(),
             (m, _) => bail!("method {m} is not used"),
         }
-        .with_context(|| format!("reach Vault at {}", conn.base))?;
+        .map_err(|e| unreachable(&conn.base, e))?;
         let status = resp.status().as_u16();
         let text = resp.body_mut().read_to_string().unwrap_or_default();
         if denied_ok && status == 403 {

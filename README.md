@@ -148,7 +148,7 @@ sealkeep run --all personal/example-app/dev -- npm run dev
 sealkeep run -e GITHUB_TOKEN=personal/github/PAT -- gh api user
 ```
 
-A name sets the variable named by its key. `--all FOLDER` sets one variable for each secret in the folder, the same as a `.env` file. `--recursive` also takes the subfolders; two secrets with the same key are then an error. `-e VAR=NAME` sets a variable with a different name. `STORE:NAME` reads from one store only.
+A name sets the variable named by its key. `--all FOLDER` sets one variable for each secret in the folder, the same as a `.env` file. `--recursive` also takes the subfolders; two secrets with the same key are then an error. If a store cannot be reached at all (no network, a VPN that takes the route), `--all` warns and uses the other stores, so a laptop runs from its keyring copy. A store that answers with an error (a refused token) still stops it, because the folder could be missing secrets. `-e VAR=NAME` sets a variable with a different name. `STORE:NAME` reads from one store only.
 
 For a tool that reads its secrets from a file, `--dotenv` writes a temporary file that only you can read. The file is in `$XDG_RUNTIME_DIR/sealkeep` when it exists. sealkeep puts the path where the command has `{dotenv}`, and it removes the file when the command ends. This example gives Playwright MCP the login of a test account. The agent types the name `ADMIN_PASSWORD`, and Playwright puts in the value:
 
@@ -240,7 +240,7 @@ sealkeep store add-vault vault --address https://vault.example.com --mount agent
 sealkeep store remove local
 ```
 
-`--auth approle` reads the role ID and the secret ID from the files and logs in at `auth/approle/login` (`--approle-mount` for another mount) on each run. The token lives only for that run. `--auth token-file --token-file PATH` reads a token that another program keeps fresh, such as a vault-agent sink, and never writes it. Neither one reads the keyring, so `run` works with no TTY and no `unlock`. Keep the files readable only by the user (`chmod 600`). A policy for a machine that only reads needs `read` on `agent/data/<folder>` and `agent/metadata/<folder>`, and `list` on `agent/metadata/*` for `list`.
+`--auth approle` reads the role ID and the secret ID from the files and logs in at `auth/approle/login` (`--approle-mount` for another mount) on each run. The token lives only for that run. `--auth token-file --token-file PATH` reads a token that another program keeps fresh, such as a vault-agent sink, and never writes it. Neither one reads the keyring, so `run` works with no TTY and no `unlock`. Keep the files readable only by the user (`chmod 600`). `$VAULT_TOKEN`, when set, is used instead of any auth method, as with the vault CLI: a person can write with their own token through a store whose AppRole only reads. A policy for a machine that only reads needs `read` on `agent/data/<folder>` and `agent/metadata/<folder>`, and `list` on `agent/metadata/*` for `list`.
 
 ### Other secret managers
 

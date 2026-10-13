@@ -1036,6 +1036,83 @@ fn vault_only_with_approle_and_token_file_never_opens_the_keyring() {
     assert!(!out.status.success());
     assert!(e.contains("AppRole login to Vault"), "{e}");
     assert!(!e.contains("wrong-secret"), "{e}");
+
+    // $VAULT_TOKEN wins over the approle: the operator's own token, with no login.
+    let out = env
+        .cmd()
+        .args(["list", "--store", "vault"])
+        .env("VAULT_TOKEN", "test-token")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        stdout(&out).contains("personal/ga/FORGEJO_TOKEN"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn run_all_goes_on_without_an_unreachable_store_but_not_a_refusing_one() {
+    let env = Env::new();
+    env.set("personal/app/API_KEY", SECRET);
+    // Nothing listens on port 1: the store cannot be reached at all.
+    env.cmd()
+        .args([
+            "store",
+            "add-vault",
+            "vault",
+            "--address",
+            "http://127.0.0.1:1",
+            "--auth",
+            "token",
+        ])
+        .assert()
+        .success();
+    let run = |token: &str| {
+        env.cmd()
+            .args([
+                "run",
+                "--all",
+                "personal/app",
+                "--",
+                "sh",
+                "-c",
+                "test \"$API_KEY\" = \"$EXPECT\"",
+            ])
+            .env("EXPECT", SECRET)
+            .env("VAULT_TOKEN", token)
+            .output()
+            .unwrap()
+    };
+    let out = run("test-token");
+    assert!(out.status.success(), "{out:?}");
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(e.contains("store `vault` is unreachable"), "{e}");
+
+    // A Vault that answers but refuses the token still stops --all: the folder may
+    // be missing secrets that only Vault has.
+    let state = Arc::new(Mutex::new(std::collections::BTreeMap::new()));
+    let url = serve_fake_vault(state);
+    env.cmd()
+        .args(["store", "remove", "vault"])
+        .assert()
+        .success();
+    env.cmd()
+        .args([
+            "store",
+            "add-vault",
+            "vault",
+            "--address",
+            &url,
+            "--auth",
+            "token",
+        ])
+        .assert()
+        .success();
+    let out = run("wrong");
+    assert!(!out.status.success(), "{out:?}");
+    let e = String::from_utf8_lossy(&out.stderr);
+    assert!(e.contains("cannot list every store"), "{e}");
 }
 
 // ── SSH keys ────────────────────────────────────────────────────────────────
