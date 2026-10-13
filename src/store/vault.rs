@@ -250,6 +250,18 @@ impl VaultStore {
 
     /// Call Vault. Opens the port forward and signs in on the first call.
     fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<(u16, Value)> {
+        self.call_with(method, path, body, false)
+    }
+
+    /// `call`, where `denied_ok` turns a 403 into `Ok((403, Null))`: a token whose policy
+    /// covers some folders of the mount can still list the folders it may read.
+    fn call_with(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        denied_ok: bool,
+    ) -> Result<(u16, Value)> {
         let mut guard = self
             .conn
             .lock()
@@ -288,6 +300,9 @@ impl VaultStore {
         .with_context(|| format!("reach Vault at {}", conn.base))?;
         let status = resp.status().as_u16();
         let text = resp.body_mut().read_to_string().unwrap_or_default();
+        if denied_ok && status == 403 {
+            return Ok((status, Value::Null));
+        }
         if status >= 400 && status != 404 {
             return Err(reply_error(status, &text)).with_context(|| format!("{method} {path}"));
         }
@@ -341,8 +356,19 @@ impl VaultStore {
     }
 
     fn read_meta(&self, folder: &str) -> Result<Option<Meta>> {
-        let (status, v) = self.call("GET", &format!("{}/metadata/{folder}", self.mount), None)?;
-        if status == 404 {
+        self.read_meta_with(folder, false)
+    }
+
+    /// The metadata of a folder; `None` when it does not exist, or (with `denied_ok`)
+    /// when the token may not read it.
+    fn read_meta_with(&self, folder: &str, denied_ok: bool) -> Result<Option<Meta>> {
+        let (status, v) = self.call_with(
+            "GET",
+            &format!("{}/metadata/{folder}", self.mount),
+            None,
+            denied_ok,
+        )?;
+        if status == 404 || status == 403 {
             return Ok(None);
         }
         let custom = v
@@ -366,15 +392,16 @@ impl VaultStore {
         Ok(())
     }
 
-    /// Every secret path under `prefix` (recursive LIST).
+    /// Every secret path under `prefix` (recursive LIST). A subfolder that the token may
+    /// not list is left out; the top of the mount must be listable.
     fn walk(&self, prefix: &str, out: &mut Vec<String>) -> Result<()> {
         let path = if prefix.is_empty() {
             format!("{}/metadata/?list=true", self.mount)
         } else {
             format!("{}/metadata/{prefix}/?list=true", self.mount)
         };
-        let (status, v) = self.call("GET", &path, None)?;
-        if status == 404 {
+        let (status, v) = self.call_with("GET", &path, None, !prefix.is_empty())?;
+        if status == 404 || status == 403 {
             return Ok(());
         }
         let keys: Vec<String> = v
@@ -416,7 +443,8 @@ impl Store for VaultStore {
         self.walk("", &mut folders)?;
         let mut out = Vec::new();
         for folder in folders {
-            let Some((custom, updated)) = self.read_meta(&folder)? else {
+            // A policy that grants some folders of the mount: list the ones it may read.
+            let Some((custom, updated)) = self.read_meta_with(&folder, true)? else {
                 continue;
             };
             for (key, desc) in custom {

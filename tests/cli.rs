@@ -676,7 +676,7 @@ fn serve_fake_vault(state: Arc<Mutex<std::collections::BTreeMap<String, KvSecret
                     } else {
                         (400, json!({"errors": ["invalid role or secret ID"]}))
                     }
-                } else if token != "test-token" {
+                } else if token != "test-token" || path.contains("/forbidden") {
                     (403, json!({"errors": ["permission denied"]}))
                 } else {
                     vault_route(&mut state.lock().unwrap(), &method, &path, &body)
@@ -966,6 +966,25 @@ fn vault_only_with_approle_and_token_file_never_opens_the_keyring() {
         state.lock().unwrap()["personal/ga"].data["FORGEJO_TOKEN"],
         SECRET
     );
+    // A folder the policy does not grant: the token may LIST the mount but not read
+    // that folder. `list` leaves it out instead of failing.
+    state.lock().unwrap().insert(
+        "personal/forbidden".into(),
+        KvSecret {
+            custom: serde_json::from_value(json!({"OTHER_KEY": "-"})).unwrap(),
+            ..Default::default()
+        },
+    );
+    let out = env
+        .cmd()
+        .args(["list", "personal/ga", "--json"])
+        .env_remove("VAULT_TOKEN")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["errors"].as_array().unwrap().len(), 0, "{v}");
+    assert!(stdout(&out).contains("personal/ga/FORGEJO_TOKEN"), "{v}");
 
     // A run with no TTY and no $VAULT_TOKEN: the value reaches the child, the output
     // is redacted, and the exit code passes through.
