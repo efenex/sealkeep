@@ -5,13 +5,15 @@
 //! The `custom_metadata` of each secret lists its keys with their descriptions, so
 //! `list` reads metadata only and no value.
 //!
-//! Auth: a token (`$VAULT_TOKEN` or the keyring entry `vault-token:<store>`), or a
+//! Auth: a token (`$VAULT_TOKEN` or the keyring entry `vault-token:<store>`), a
 //! Kubernetes ServiceAccount JWT from `jwt_command` that Vault exchanges for a token that
-//! lives for the TTL of its role. `port_forward` reaches a Vault that has no address
+//! lives for the TTL of its role, an AppRole whose role ID and secret ID are in files, or
+//! a token file that another program (a vault-agent sink) keeps fresh. The last two need
+//! no keyring, so a store of either kind works on a machine with no desktop session. `port_forward` reaches a Vault that has no address
 //! outside its cluster, through the Kubernetes API that the kubeconfig already reaches.
 
 use super::{SecretInfo, Store, keyring};
-use crate::config::{DEFAULT_KEYRING_SERVICE, StoreConfig, VaultAuth};
+use crate::config::{self, DEFAULT_KEYRING_SERVICE, StoreConfig, VaultAuth};
 use crate::names;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value, json};
@@ -31,6 +33,10 @@ pub struct VaultStore {
     auth: VaultAuth,
     role: Option<String>,
     k8s_auth_mount: String,
+    approle_mount: String,
+    role_id_file: Option<String>,
+    secret_id_file: Option<String>,
+    token_file: Option<String>,
     jwt_command: Vec<String>,
     port_forward: Vec<String>,
     agent: Agent,
@@ -70,6 +76,20 @@ fn reply_error(status: u16, body: &str) -> anyhow::Error {
     }
 }
 
+/// The trimmed content of a credential file named in the config. The error names the
+/// file, never its content.
+fn read_secret_file(path: Option<&str>, field: &str) -> Result<String> {
+    let path = path.with_context(|| format!("the store has no `{field}`"))?;
+    let p = config::expand_home(path);
+    let text =
+        std::fs::read_to_string(&p).with_context(|| format!("read the {field} {}", p.display()))?;
+    let text = text.trim();
+    if text.is_empty() {
+        bail!("the {field} {} is empty", p.display());
+    }
+    Ok(text.to_string())
+}
+
 fn free_port() -> Result<u16> {
     let l = TcpListener::bind("127.0.0.1:0").context("find a free local port")?;
     Ok(l.local_addr()?.port())
@@ -84,6 +104,10 @@ impl VaultStore {
             auth,
             role,
             k8s_auth_mount,
+            approle_mount,
+            role_id_file,
+            secret_id_file,
+            token_file,
             jwt_command,
             port_forward,
         } = cfg
@@ -104,6 +128,10 @@ impl VaultStore {
             auth,
             role,
             k8s_auth_mount,
+            approle_mount,
+            role_id_file,
+            secret_id_file,
+            token_file,
             jwt_command,
             port_forward,
             agent,
@@ -151,6 +179,25 @@ impl VaultStore {
         }
     }
 
+    /// Exchange a login body at `auth/<mount>/login` for a client token.
+    fn login_at(&self, base: &str, mount: &str, body: Value, what: &str) -> Result<String> {
+        let mut resp = self
+            .agent
+            .post(format!("{base}/v1/auth/{mount}/login"))
+            .send_json(body)
+            .with_context(|| format!("reach Vault at {base}"))?;
+        let status = resp.status().as_u16();
+        let body = resp.body_mut().read_to_string().unwrap_or_default();
+        if status != 200 {
+            return Err(reply_error(status, &body)).context(format!("{what} login to Vault"));
+        }
+        let v: Value = serde_json::from_str(&body)?;
+        v.pointer("/auth/client_token")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .context("the Vault login reply has no client_token")
+    }
+
     fn login(&self, base: &str) -> Result<String> {
         match self.auth {
             VaultAuth::Token => {
@@ -180,22 +227,24 @@ impl VaultStore {
                     );
                 }
                 let jwt = String::from_utf8(out.stdout)?.trim().to_string();
-                let mut resp = self
-                    .agent
-                    .post(format!("{base}/v1/auth/{}/login", self.k8s_auth_mount))
-                    .send_json(json!({ "role": self.role, "jwt": jwt }))
-                    .with_context(|| format!("reach Vault at {base}"))?;
-                let status = resp.status().as_u16();
-                let body = resp.body_mut().read_to_string().unwrap_or_default();
-                if status != 200 {
-                    return Err(reply_error(status, &body)).context("Kubernetes login to Vault");
-                }
-                let v: Value = serde_json::from_str(&body)?;
-                v.pointer("/auth/client_token")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .context("the Vault login reply has no client_token")
+                self.login_at(
+                    base,
+                    &self.k8s_auth_mount,
+                    json!({ "role": self.role, "jwt": jwt }),
+                    "Kubernetes",
+                )
             }
+            VaultAuth::Approle => {
+                let role_id = read_secret_file(self.role_id_file.as_deref(), "role_id_file")?;
+                let secret_id = read_secret_file(self.secret_id_file.as_deref(), "secret_id_file")?;
+                self.login_at(
+                    base,
+                    &self.approle_mount,
+                    json!({ "role_id": role_id, "secret_id": secret_id }),
+                    "AppRole",
+                )
+            }
+            VaultAuth::TokenFile => read_secret_file(self.token_file.as_deref(), "token_file"),
         }
     }
 

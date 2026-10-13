@@ -230,6 +230,18 @@ sealkeep sync --from local --to vault   # one time, for the secrets that are alr
 
 `set`, `import` and `mv` write to every store (a Vault store takes only names with a folder), so the stores stay the same. `--store NAME` writes to one store. The Vault side needs a KV v2 mount, a policy with `create`, `read` and `update` on `agent/data/*` and `read`, `list` and `update` on `agent/metadata/*`, and a Kubernetes auth role bound to the ServiceAccount. With `--auth token`, sealkeep reads `$VAULT_TOKEN`, or the token that `sealkeep store token vault` keeps in the keyring.
 
+### Vault with no keyring (servers, timers)
+
+A machine with no desktop session, such as a server that runs an agent from a timer, cannot unlock a keyring. Give it a config with only a Vault store, and an auth that keeps its credential in a file:
+
+```sh
+sealkeep store add-vault vault --address https://vault.example.com --mount agent \
+  --auth approle --role-id-file ~/.config/vault/role-id --secret-id-file ~/.config/vault/secret-id
+sealkeep store remove local
+```
+
+`--auth approle` reads the role ID and the secret ID from the files and logs in at `auth/approle/login` (`--approle-mount` for another mount) on each run. The token lives only for that run. `--auth token-file --token-file PATH` reads a token that another program keeps fresh, such as a vault-agent sink, and never writes it. Neither one reads the keyring, so `run` works with no TTY and no `unlock`. Keep the files readable only by the user (`chmod 600`). A policy for a machine that only reads needs `read` on `agent/data/<folder>` and `agent/metadata/<folder>`, and `list` on `agent/metadata/*` for `list`.
+
 ### Other secret managers
 
 Each of these is a store kind. It runs the official CLI of the vendor, so the vendor's own sign-in (SSO, a service account, biometrics) applies, and sealkeep keeps no vendor token. A value goes to the CLI through stdin or through a file that only you can read, never as a command argument, which `ps` would show.
