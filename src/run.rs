@@ -159,6 +159,15 @@ impl Prepared {
             status
         })?;
         drop(self.dotenv);
+        // The command died from a signal: die from it too, so that whoever started
+        // sealkeep (a shell, systemd, launchd) sees a stop by that signal, not an exit code.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt as _;
+            if let Some(sig) = status.signal() {
+                forward::die_from(sig);
+            }
+        }
         Ok(exit_code(status))
     }
 
@@ -240,6 +249,9 @@ impl Prepared {
 /// The command stays in the process group of sealkeep, so it keeps its terminal. The
 /// terminal sends INT and QUIT to the whole foreground group, so when sealkeep is in the
 /// foreground group they are not passed on as well: the command would see them twice.
+///
+/// When the command dies from a signal, sealkeep does the same (`die_from`) instead of
+/// exiting with 128+n, as dumb-init does.
 #[cfg(unix)]
 mod forward {
     use std::sync::atomic::{AtomicI32, AtomicU32, Ordering::Relaxed};
@@ -341,6 +353,23 @@ mod forward {
             for (sig, old) in &self.saved {
                 unsafe { libc::sigaction(*sig, old, std::ptr::null_mut()) };
             }
+        }
+    }
+
+    /// Raise `sig` on this process with the default action. Returns only if the signal
+    /// did not end the process (one whose default is to be ignored); the caller then
+    /// exits with 128+n.
+    pub fn die_from(sig: libc::c_int) {
+        unsafe {
+            let mut dfl: libc::sigaction = std::mem::zeroed();
+            dfl.sa_sigaction = libc::SIG_DFL;
+            libc::sigemptyset(&mut dfl.sa_mask);
+            libc::sigaction(sig, &dfl, std::ptr::null_mut());
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, sig);
+            libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+            libc::raise(sig);
         }
     }
 

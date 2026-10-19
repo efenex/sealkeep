@@ -1347,12 +1347,13 @@ fn run_forwards_signals_to_the_command_and_waits_for_it() {
     );
     assert!(env.path("marker.usr1").exists());
 
-    // A command that does not catch TERM dies from it: 128 + 15.
+    // A command that does not catch TERM dies from it, and so does sealkeep: it is ended
+    // by TERM, it does not exit with 128 + 15.
     let _ = std::fs::remove_file(env.path("ready"));
     let script = r#"echo $$ > "$READY.tmp"; mv "$READY.tmp" "$READY"; exec sleep 30"#;
     let (sealkeep, pid) = spawn_run_until_ready(&env, script);
     unsafe { libc::kill(sealkeep.id() as i32, libc::SIGTERM) };
     let st = wait_or_kill(sealkeep, pid);
-    assert_eq!(st.code(), Some(128 + libc::SIGTERM), "{st:?}");
-    assert_eq!(st.signal(), None);
+    assert_eq!(st.signal(), Some(libc::SIGTERM), "{st:?}");
+    assert_eq!(st.code(), None);
 }
