@@ -42,6 +42,7 @@ zbus = { version = "5.19.0", default-features = false, features = ["blocking-api
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.190"
+signal-hook = { version = "0.3.18", default-features = false }
 
 [features]
 # A file-backed keyring for the integration tests. Release builds leave it out.

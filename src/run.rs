@@ -133,6 +133,9 @@ impl Prepared {
     /// redacted on their way to the terminal. Returns the exit code.
     pub fn run_streamed(self) -> Result<i32> {
         self.log(None)?;
+        // Install before spawning so a signal during startup is not lost.
+        #[cfg(unix)]
+        let signals = ForwardSignals::new()?;
         let mut child = self
             .command()
             .stdin(Stdio::inherit())
@@ -146,6 +149,9 @@ impl Prepared {
             let r = &self.redactor;
             let a = s.spawn(move || pump(r, out, std::io::stdout()));
             let b = s.spawn(move || pump(r, err, std::io::stderr()));
+            #[cfg(unix)]
+            let status = signals.wait(&mut child);
+            #[cfg(not(unix))]
             let status = child.wait();
             let _ = a.join();
             let _ = b.join();
@@ -222,6 +228,55 @@ impl Prepared {
             truncated: stdout.1 || stderr.1,
             timed_out,
         })
+    }
+}
+
+/// CLI-only signal handling: keep redaction and dotenv cleanup alive while the
+/// child shuts down. Do not install process-wide handlers for individual MCP runs.
+#[cfg(unix)]
+struct ForwardSignals {
+    flags: Vec<(
+        i32,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        signal_hook::SigId,
+    )>,
+}
+
+#[cfg(unix)]
+impl ForwardSignals {
+    fn new() -> std::io::Result<Self> {
+        let mut signals = Self { flags: Vec::new() };
+        for signal in [libc::SIGTERM, libc::SIGINT] {
+            let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let id = signal_hook::flag::register(signal, flag.clone())?;
+            signals.flags.push((signal, flag, id));
+        }
+        Ok(signals)
+    }
+
+    fn wait(&self, child: &mut std::process::Child) -> std::io::Result<ExitStatus> {
+        loop {
+            for (signal, flag, _) in &self.flags {
+                if flag.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    // SAFETY: the child has not been reaped, so its PID cannot
+                    // have been reused. Only forward to it, not our process group.
+                    unsafe { libc::kill(child.id() as libc::pid_t, *signal) };
+                }
+            }
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ForwardSignals {
+    fn drop(&mut self) {
+        for (_, _, id) in &self.flags {
+            signal_hook::low_level::unregister(*id);
+        }
     }
 }
 

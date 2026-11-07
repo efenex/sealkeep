@@ -150,6 +150,8 @@ sealkeep run -e GITHUB_TOKEN=personal/github/PAT -- gh api user
 
 A name sets the variable named by its key. `--all FOLDER` sets one variable for each secret in the folder, the same as a `.env` file. `--recursive` also takes the subfolders; two secrets with the same key are then an error. `-e VAR=NAME` sets a variable with a different name. `STORE:NAME` reads from one store only.
 
+On Unix, `sealkeep run` forwards TERM and INT sent to its PID to the direct child, then waits for it to exit. Output stays redacted during shutdown, and temporary dotenv files are removed. A child that launches more processes is responsible for stopping them; sealkeep does not signal the whole process group.
+
 For a tool that reads its secrets from a file, `--dotenv` writes a temporary file that only you can read. The file is in `$XDG_RUNTIME_DIR/sealkeep` when it exists. sealkeep puts the path where the command has `{dotenv}`, and it removes the file when the command ends. This example gives Playwright MCP the login of a test account. The agent types the name `ADMIN_PASSWORD`, and Playwright puts in the value:
 
 ```sh
